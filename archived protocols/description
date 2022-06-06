@@ -1,0 +1,210 @@
+- We have a `LPWrapper` contract:
+    - It stores the variables:
+        - `IERC20 internal LPToken` - an erc20 contract of the LPtoken such that we can access erc20 deposit, withdraw functions
+        - `mapping (address => uint256) public balances` - tracks how many LPtokens have been transferred from some account to this contract
+        - track which accounts have transferred tokens to this contract
+            - `address[] internal usersArray`
+            - `mapping (address => bool) internal users` 
+    - When we deploy the contract, we specify the address of the LPToken contract
+        - `constructor(address _LPTokenAddress)
+
+LPToken = IERC20(_LPTokenAddress)`
+    - Includes functions for depositing LPTokens to this contract and withdrawing LPTokens back to the user's account
+        - `function deposit(uint256 amount)`
+            - balances[msg.sender] = balances[msg.sender].add(amount);
+            - LP.transferFrom(msg.sender, address(this), amount);
+        - `function withdraw(uint256 amount)`
+            - balances[msg.sender] = balances[msg.sender].sub(amount);
+            - LP.transfer(msg.sender, amount);
+- Protocol Option 1
+    - Description::
+        - Multiple reward periods can be defined - but one is set as the "current" reward period for this contract.  The duration and amount of reward tokens available are defined here.
+        - Users can stake their LP tokens during the duration of the period, and they earn part of the allocated reward tokens proportional to amount staked and length of staking period.
+        - Reward tokens are distributed at a constant rate (e.g x reward tokens per second) among all stakers.
+        - Users can add and remove tokens from their staked amount at any time, and claim their accrued tokens. 
+    - We have a `Staking` contract, which inherits the `LPWrapper`
+        - It stores the variables:
+            - `mapping (address => uint) public stakes` - tracks how many LPtokens have been staked by each account
+            - `uint public totalStakes` - tracks the total amount staked
+        - When we deploy the contract, we specify the address of the LPToken contract, and the rewardToken contract
+            - `constructor(address _rewardTokenAddress, address _lpTokenAddress) Wallet(_lpTokenAddress)`
+        - Includes function for 
+            - `function startStake(uint amount)`
+                - The user must first `function deposit(uint256 amount)` to `LPWrapper`
+                    - For better UX, we can also `depositAndStartStake`
+                - Move tokens the user deposited in `LPWrapper` to this contract
+            - `function endStake(uint amount)`
+                - Return tokens the user staked back to `LPWrapper`
+                - The user can then `function withdraw(uint256 amount)` from `LPWrapper`
+                    - For better UX, we can also `endStakeAndWithdraw`
+    - We have a `Rewards` contract, which inherits `Staking`. 
+        - It stores the variables:
+            - `struct UserInfo`
+                - ```solidity
+uint userRewardPerTokenStaked;
+uint pendingRewards;
+uint rewardsPaid;```
+            - `struct RewardPeriod`
+                - ```solidity
+uint id;
+uint reward;
+uint from;
+uint to;
+uint lastUpdated; // when the totalStakedWeight was last updated (after last stake was ended)
+uint rewardPerTokenStaked; // S: SUM(reward/T) - sum of all rewards distributed divided by all active stakes
+
+uint totalStaked; // T: sum of all active stake deposits
+uint totalRewardsPaid; ```
+            - ---
+            - `IERC20 internal rewardToken` - an erc20 contract of the rewardToken such that we can access erc20 deposit, withdraw functions
+            - `RewardPeriod[] public rewardPeriods` - an array of `struct RewardPeriod`s
+                - `struct RewardPeriod`
+                    - ```solidity
+uint id;
+uint reward;
+uint from;
+uint to;
+uint lastUpdated; // when the totalStakedWeight was last updated (after last stake was ended)
+uint rewardPerTokenStaked; // S: SUM(reward/T) - sum of all rewards distributed divided by all active stakes
+
+uint totalStaked; // T: sum of all active stake deposits
+uint totalRewardsPaid; ```
+            - `mapping(address => UserInfo) userInfos` - tracks the `struct UserInfo` of each account
+                - `struct UserInfo`
+                    - ```solidity
+uint userRewardPerTokenStaked;
+uint pendingRewards;
+uint rewardsPaid;```
+        - When we deploy the contract, we specify the address of the LPToken contract, and the rewardToken contract
+            - `constructor(address _rewardTokenAddress, address _lpTokenAddress) StakingPool(_rewardTokenAddress, _lpTokenAddress)`
+        - Includes function for
+            - The owner of this contract transferring reward tokens (that they previously minted) to it.
+                - `function depositReward(uint amount) onlyOwner`
+                    - rewardToken.transferFrom(msg.sender, address(this), amount);
+            - Adding and deleting reward periods to the [array tracking it](((EalFF0La3))). And having 1 of them be the "current" reward period.
+                - `function newRewardPeriod(uint reward, uint from, uint to)`
+                    - rewardPeriods.push(RewardPeriod(rewardPeriods.length+1, reward, from, to, block.timestamp, 0, 0, 0));
+                        - ```solidity
+uint id;
+uint reward;
+uint from;
+uint to;
+uint lastUpdated; // when the totalStakedWeight was last updated (after last stake was ended)
+uint rewardPerTokenStaked; // S: SUM(reward/T) - sum of all rewards distributed divided by all active stakes
+
+uint totalStaked; // T: sum of all active stake deposits
+uint totalRewardsPaid; ```
+                            - The ID is generated based on rewardPeriods.length+1
+                            - The reward amount, from date, and to date are provided in args
+                            - The lastUpdated is simply block.timestamp when this function was called
+                            - totalStaked, rewardPerTokenStaked, and totalRewardsPaid are all 0
+                    - Call `function depositReward(uint amount) onlyOwner` with the reward amount provided in arg
+                - `function deleteRewardPeriod(uint index)`
+                - `function getCurrentRewardPeriodId()`
+                    - Find the last added reward period which satisfies `period.from <= block.timestamp && period.to >= block.timestamp`
+            - Calculating rewards - implements the method described in [Scalable Reward Distribution on the Ethereum Blockchain](https://uploads-ssl.webflow.com/5ad71ffeb79acc67c8bcdaba/5ad8d1193a40977462982470_scalable-reward-distribution-paper.pdf)
+                - `function calculateRewardDistribution(RewardPeriod memory period)`
+                    - Calculate the rewardRate of the rewardperiod
+                        - calculate duration = period.to - period.from
+                        - calculate rate = period.reward / duration
+                    - Calculate deltaTime which has passed since the [last update](((Jw9fHjs8V))) of the rewardperiod
+                        - deltaTime = block.timestamp - period.lastUpdated
+                    - Calculate reward = deltaTime * rewardRate
+                    - Calculate newRewardPerTokenStaked based on the current rewardPerTokenStaked of the rewardperiod
+                        - newRewardPerTokenStaked = period.rewardPerTokenStaked + ([reward](((0cjeGvBJQ))) * rewardPrecision / period.totalStaked)
+                            - rewardPrecision
+                                - uint constant rewardPrecision = 1e9
+                - `function calculateReward(uint rewardDistribution)`
+                    - Get the amount staked by the user, and their userInfo. rewardDistribution (aka RewardPerTokenStaked) is provided as an arg.
+                    - reward = staked * (RewardPerTokenStaked  - userInfo.userRewardPerTokenStaked) / rewardPrecision
+                - `function update()`
+                    - `function getCurrentRewardPeriodId()`, then call `function calculateRewardDistribution(RewardPeriod memory period)`  to get `rewardDistributedPerToken`
+                    - ^^((hsJMTEweQ)) with `rewardDistributedPerToken` to get `reward`, then add it to the user's `pendingRewards` in their `userInfo`^^
+                    -  Set `rewardDistributedPerToken` as the user's new `userRewardPerTokenStaked` in their `userInfo`
+                    - Update the period's `rewardPerTokenStaked` with `rewardDistributedPerToken` and `lastUpdated` with `block.timestamp`
+            - ---
+            - Calculating a user's `pendingRewards`, then paying it to them
+                - `function claimableReward()`
+                    - `function getCurrentRewardPeriodId()`, then call `function calculateRewardDistribution(RewardPeriod memory period)`  to get `newRewardDistribution`
+                    - `function calculateReward(uint rewardDistribution)` with `newRewardDistribution` to get `reward`
+                    - Get the `userInfo` for the function caller, and add the `reward` to their `pendingRewards`
+                - `function claim()`
+                    - Get the `userInfo` for the function caller, and then their `pendingRewards`
+                    - `function getCurrentRewardPeriodId()`, then add `pendingRewards` to the `totalRewardsPaid`
+                    - `function payReward(address account, uint reward)` to the function caller, and set their `pendingRewards` to 0
+                        - `function payReward(address account, uint reward)`
+                            - Get the `userInfo` for the caller, and add to their `rewardsPaid`
+                            - transfer specified `rewardToken` to the caller
+            - Extending the functions for starting and ending stakes from `Staking` such that rewards can get calculated and withdrawn when the stake ends
+                - `function startStake(uint amount)`
+                    - Call `function update()`
+                    - Call `function startStake(uint amount)` from `Staking` contract
+                    - `function getCurrentRewardPeriodId()`, then add to the current `RewardPeriod`'s totalStaked
+                - `function endStake(uint amount)`
+                    - Call `function update()`
+                    - Call `function endStake(uint amount)` from `Staking` contract
+                    - `function getCurrentRewardPeriodId()`, then subtract from the current `RewardPeriod`'s totalStaked
+                    - Call `function claim()`
+- Protocol Option 2
+    - Description::
+        - Much simpler than Protocol Option 1.
+        - The contract only defines 1 reward period instead of storing an array of multiple periods and setting 1 as the current period.
+        - Rewards are recalculated every time there is a stake addition or withdraw, or a reward withdraw
+        - Users can add and remove tokens from their staked amount at any time, and claim their accrued tokens. 
+    - We have a `Staking` contract, which inherits the `LPWrapper`
+        - It stores the variables:
+            - `IERC20 internal rewardToken` - an erc20 contract of the rewardToken such that we can access erc20 deposit, withdraw functions
+            - `uint256 public rewardRate = 0;`
+            - Details about the [reward period](((EalFF0La3)))
+                - `uint256 public immutable DURATION` - duration of reward period
+                - `uint256 public periodFinish = 0;` - finish date
+                - `uint256 public lastUpdateTime;`
+                - `uint256 public rewardPerTokenStaked;`
+                - ---
+                - Unlike Protocol Option 1, this doesn't need to be inside a struct since there is only 1 reward period.
+                    - `struct RewardPeriod`
+                        - ```solidity
+uint id;
+uint reward;
+uint from;
+uint to;
+uint lastUpdated; // when the totalStakedWeight was last updated (after last stake was ended)
+uint rewardPerTokenStaked; // S: SUM(reward/T) - sum of all rewards distributed divided by all active stakes
+
+uint totalStaked; // T: sum of all active stake deposits
+uint totalRewardsPaid; ```
+            - Details about users
+                - `mapping(address => uint256) public userRewardPerTokenStaked;`
+                - `mapping(address => uint256) public rewards;`
+                - ---
+                - Unlike Protocol Option 1, this isn't inside a struct 
+                    - `struct UserInfo`
+                        - ```solidity
+uint userRewardPerTokenStaked;
+uint pendingRewards;
+uint rewardsPaid;```
+        - When we deploy the contract, we specify the address of the LPToken contract, the rewardToken contract, and the duration
+            - `constructor(IERC20 LPToken_, IERC20 rewardToken_, uint256 duration) LPTokenWrapper(LPToken_)`
+        - Includes function for
+            - Staking & Withdrawing LPTokens by calling those functions in `LPWrapper`
+                - `function stake(uint256 amount) updateReward(msg.sender)`
+                    - `function stake(uint256 amount)`
+                - `function withdraw(uint256 amount) updateReward(msg.sender)`
+                    - `function withdraw(uint256 amount)`
+            - Calculating reward
+                - new $$\text{reward} = \frac{\text{staked} \times (\text{rewardPerToken} - \text{userRewardPerTokenPaid})}{\text{reward}}$$
+                - new $$\text{rewardPerTokenStored} = \text{rewardPerTokenStored + (\text{lastTimeRewardApplicable}  - \text{(now - periodEnd)} * (rewardRate / totalSupply)}$$
+                - `function earned(address account)`
+                    - reward = balanceOf(account)  * ( `function rewardPerToken()`- userRewardPerTokenPaid[account] ) / rewardPrecision + rewards[account]
+                - `function rewardPerToken()`
+                    - rewardPerTokenStored = rewardPerTokenStored + ((block.timestamp - periodFinish) - lastUpdateTime * rewardRate * rewardPrecision / totalSupply)
+                        - totalSupply
+                            - From [LPWrapper](((hPjk6A_YI)))
+            - Paying reward to user
+                - `modifier updateReward(address account) `
+                    - lastUpdateTime = block.timestamp - periodFinish
+                    - rewards[account] = `function earned(address account)`
+                    - userRewardPerTokenPaid[account] = `function rewardPerToken()`
+                - `function getReward() updateReward(msg.sender)`
+                    - reward = `function earned(address account)`
+                    - rewardToken.safeTransfer(msg.sender, reward)
